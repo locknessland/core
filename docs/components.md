@@ -1,0 +1,229 @@
+# Components
+
+Lockness uses JSX for building UI components. Generate reusable components with
+the Cli CLI.
+
+## Creating Components
+
+Use the `make:component` command to scaffold new JSX components:
+
+```bash
+deno task cli make:component Button
+```
+
+This creates `app/view/components/button.tsx`:
+
+```typescript
+export const Button = (props: { children?: any }) => {
+    return (
+        <button>
+            {props.children}
+        </button>
+    )
+}
+```
+
+**Naming conventions:**
+
+- **Component class name:** PascalCase (e.g., `Button`, `UserCard`)
+- **File name:** snake_case (e.g., `button.tsx`, `user_card.tsx`)
+- **Props interface:** `<ComponentName>Props`
+
+## Nested Components
+
+Create components in subdirectories for better organization:
+
+```bash
+deno task cli make:component ui/Card
+deno task cli make:component forms/Input
+```
+
+This creates:
+
+- `app/view/components/ui/card.tsx`
+- `app/view/components/forms/input.tsx`
+
+## Component Props
+
+Define typed props for your components:
+
+```typescript
+interface ButtonProps {
+    variant?: 'primary' | 'secondary' | 'danger'
+    size?: 'sm' | 'md' | 'lg'
+    disabled?: boolean
+    onClick?: () => void
+    children?: any
+}
+
+export const Button = (props: ButtonProps) => {
+    const variant = props.variant || 'primary'
+    const size = props.size || 'md'
+
+    return (
+        <button
+            class={`btn btn-${variant} btn-${size}`}
+            disabled={props.disabled}
+            onClick={props.onClick}
+        >
+            {props.children}
+        </button>
+    )
+}
+```
+
+## Layouts
+
+Layouts wrap pages with common structure like navigation bars, sidebars, and
+footers. They're higher-order components that provide consistent styling across
+multiple pages.
+
+**Creating a Layout:**
+
+```typescript
+// app/view/layouts/auth_layout.tsx
+export const AuthLayout = ({
+    title,
+    children,
+}: {
+    title: string
+    children: JSX.Element
+}) => {
+    return (
+        <>
+            <head>
+                <title>{title} - Lockness</title>
+                <meta charset='UTF-8' />
+                <meta
+                    name='viewport'
+                    content='width=device-width, initial-scale=1.0'
+                />
+            </head>
+            <body>
+                <Navbar />
+                <main>{children}</main>
+            </body>
+        </>
+    )
+}
+```
+
+**Using a Layout in a Page:**
+
+```typescript
+import { AuthLayout } from '@view/layouts/auth_layout.tsx'
+
+export const LoginPage = () => {
+    return (
+        <AuthLayout title='Login'>
+            <div class='min-h-screen flex items-center justify-center'>
+                <form class='space-y-4'>
+                    <input type='email' placeholder='Email' />
+                    <input type='password' placeholder='Password' />
+                    <button>Login</button>
+                </form>
+            </div>
+        </AuthLayout>
+    )
+}
+```
+
+**Layout Best Practices:**
+
+- ✓ Use layouts for pages with shared structure (navigation, sidebars)
+- ✓ Pass children as the main content area
+- ✓ Extract reusable components (Navbar, Sidebar) into separate files
+- ✓ Use consistent naming (e.g., `app_layout.tsx`, `docs_layout.tsx`)
+
+## Using Components
+
+Import and use components from `@lockness/ui/components` in your pages and
+layouts:
+
+```typescript
+import {
+    Button,
+    Card,
+    CardContent,
+    CardHeader,
+    CardTitle,
+    Navbar,
+    NavbarBrand,
+    NavbarContent,
+    NavbarMenuItem,
+} from '@lockness/ui/components'
+
+export const HomePage = () => {
+    return (
+        <div>
+            <Navbar>
+                <NavbarBrand href='/'>Lockness</NavbarBrand>
+                <NavbarContent position='right'>
+                    <NavbarMenuItem href='/docs'>Docs</NavbarMenuItem>
+                </NavbarContent>
+            </Navbar>
+            <Card>
+                <CardHeader>
+                    <CardTitle>Welcome</CardTitle>
+                </CardHeader>
+                <CardContent>
+                    <Button variant='primary' size='lg'>
+                        Get Started
+                    </Button>
+                </CardContent>
+            </Card>
+        </div>
+    )
+}
+```
+
+## JSX Features
+
+**✓ TypeScript support** - Full type checking for props and JSX
+
+**✓ Server-side rendering** - Components render on the server for fast initial
+load
+
+**✓ Children support** - Pass children to components like React
+
+## Component Structure
+
+Organize your components by feature or type:
+
+```plaintext
+app/view/components/
+├── ui/
+│   ├── button.tsx
+│   ├── card.tsx
+│   └── badge.tsx
+├── forms/
+│   ├── input.tsx
+│   ├── select.tsx
+│   └── textarea.tsx
+├── layout/
+│   ├── header.tsx
+│   ├── footer.tsx
+│   └── sidebar.tsx
+└── docs_sidebar.tsx
+```
+
+## Best Practices
+
+**✓ Keep components small and focused** - Each component should do one thing
+well
+
+**✓ Use TypeScript interfaces for props** - Define clear contracts for component
+APIs
+
+**✓ Export const arrow functions** - Consistent with Lockness conventions
+
+**✓ Group related components** - Use subdirectories for organization
+
+## Next Steps
+
+Now that you know how to create components, learn how to use them in pages and
+layouts:
+
+- [Routing & Controllers](/docs/routing)
+- [Getting Started Guide](/docs/getting-started)
+- [CLI Commands](/docs/cli)
