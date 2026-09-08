@@ -25,13 +25,37 @@
 
 import type { CacheConfig, SessionConfig } from '../kernel_decorators.ts'
 
+// Environment-name resolution lives in one place — `../../environment.ts`.
+// Imported for local use (the `secure` cookie default below) and re-exported
+// for the bootstrap consumers (e.g. the session boot gate) that already import
+// it from this module.
+import {
+    isDevelopment,
+    isProduction,
+    resolveEnvName,
+} from '../../environment.ts'
+export { isDevelopment, isProduction, resolveEnvName }
+
 /**
- * Normalized session config with required fields.
+ * Normalized session config.
+ *
+ * `secret` is **optional on purpose**. In production with no `APP_KEY` there is
+ * nothing to return — the framework refuses to boot rather than substituting a
+ * literal — so the absence has to be representable. `steps/session.ts` is where
+ * that absence becomes a boot failure or a development key.
  */
 export interface NormalizedSessionConfig {
     driver: NonNullable<SessionConfig['driver']>
-    secret: string
+    secret?: string
     lifetime: number
+    /**
+     * The absolute-lifetime ceiling in seconds, or `undefined` when disabled.
+     * Passed through verbatim (opt-in); a non-positive value is rejected at
+     * normalisation, so this is either `undefined` or a positive number.
+     */
+    absoluteLifetime?: number
+    /** Whether per-session cookie revocation is enabled. Requires the cap. */
+    revocation?: boolean
     secure: boolean
 }
 
@@ -109,6 +133,8 @@ export async function tryImportOptionalPackage<T = unknown>(
  * ```typescript
  * const config1 = normalizeSessionConfig(true)
  * // Returns: { driver: 'cookie', secret: env.APP_KEY, lifetime: 7200, secure: false }
+ * // — with `secret: undefined` when APP_KEY is unset. That is not an oversight;
+ * //   see the note in the body.
  *
  * const config2 = normalizeSessionConfig({ driver: 'memory' })
  * // Returns: { driver: 'memory', secret: env.APP_KEY, lifetime: 7200, secure: false }
@@ -119,13 +145,34 @@ export function normalizeSessionConfig(
 ): NormalizedSessionConfig {
     const baseConfig = typeof config === 'object' ? config : {}
 
-    const secret = baseConfig.secret ?? Deno.env.get('APP_KEY') ??
-        'change-me-in-production'
+    // Explicit configuration, then APP_KEY, then NOTHING.
+    //
+    // There is deliberately no third fallback. The literal that used to sit here
+    // — committed to this repository, guarded by a console.warn — made every
+    // deployment that forgot APP_KEY share one publicly known key. Returning
+    // `undefined` instead moves the decision to the one place that can take it:
+    // `steps/session.ts`, which knows the environment and can refuse to boot.
+    const secret = baseConfig.secret ?? Deno.env.get('APP_KEY')
 
-    // Warn if using default secret
-    if (secret === 'change-me-in-production') {
-        console.warn(
-            '⚠️  Using default session secret. Set APP_KEY environment variable for production.',
+    // The absolute cap is opt-in (undefined = off). A non-positive value is a
+    // configuration error, NOT "off" — refuse it rather than silently disable the
+    // cap an operator believed they had enabled (fail-closed on misconfig).
+    const absoluteLifetime = baseConfig.absoluteLifetime
+    if (absoluteLifetime !== undefined && absoluteLifetime <= 0) {
+        throw new Error(
+            `session.absoluteLifetime must be a positive number of seconds when set (got ${absoluteLifetime}); ` +
+                'leave it undefined to disable the absolute-lifetime cap.',
+        )
+    }
+
+    // Revocation needs the cap to bound each revocation entry's retention; an
+    // unbounded cookie has no finite horizon for its revocation record. Refuse
+    // the combination at boot rather than grow the KV set forever.
+    const revocation = baseConfig.revocation ?? false
+    if (revocation && absoluteLifetime === undefined) {
+        throw new Error(
+            'session.revocation requires session.absoluteLifetime to be set — ' +
+                'it bounds how long each revocation entry is retained.',
         )
     }
 
@@ -133,10 +180,45 @@ export function normalizeSessionConfig(
         driver: baseConfig.driver ?? 'cookie',
         secret,
         lifetime: baseConfig.lifetime ?? 7200,
-        secure: baseConfig.secure ??
-            (Deno.env.get('APP_ENV') === 'production'),
+        absoluteLifetime,
+        revocation,
+        secure: baseConfig.secure ?? isProduction(),
     }
 }
+
+/**
+ * The development session key, generated once per process.
+ *
+ * Outside production, an application with no `APP_KEY` gets a random key rather
+ * than a shared literal: sessions then do not survive a restart, which is
+ * correct and far preferable to every developer's machine — and every forgotten
+ * deployment — running on the same publicly known key.
+ *
+ * **Memoised at module scope, not inside {@link normalizeSessionConfig}.** That
+ * function is pure and runs once per `createApp` plus four times in core's own
+ * suite, so generating inside it would produce a key *per call*: two
+ * applications in one process would hold different keys, and nothing would
+ * notice.
+ *
+ * The generator is passed in rather than imported. `@lockness/session` is an
+ * optional dependency loaded at bootstrap, so core cannot import it statically —
+ * and it must not grow a second key generator of its own, which would drift from
+ * the shape `assertUsableSecret` enforces.
+ *
+ * @param generate - `generateAppKey` from the loaded session module.
+ * @returns The same key for the lifetime of this process.
+ *
+ * @example
+ * ```typescript
+ * const secret = devSessionKey(sessionModule.generateAppKey)
+ * ```
+ */
+export function devSessionKey(generate: () => string): string {
+    processSessionKey ??= generate()
+    return processSessionKey
+}
+
+let processSessionKey: string | undefined
 
 /**
  * Normalize cache configuration to a full CacheConfig object.

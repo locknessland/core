@@ -8,6 +8,7 @@
  */
 
 import type { Hono } from 'hono'
+import { resolveEnvName } from '../environment.ts'
 
 /**
  * Configuration options for the server listener.
@@ -49,10 +50,11 @@ export class ServerListener {
      * @example
      * ```typescript
      * const server = listener.listen(hono, { port: 8888, version: '1.0.0' })
-     *
-     * // Graceful shutdown
-     * Deno.addSignalListener('SIGINT', () => server.shutdown())
      * ```
+     *
+     * @remarks
+     * Applications do not call this directly and do not wire signals: `App.listen()`
+     * installs SIGINT/SIGTERM handlers and runs the ordered teardown itself.
      */
     listen(
         hono: Hono,
@@ -76,8 +78,13 @@ export class ServerListener {
      * @internal
      */
     private displayBanner(version: string): void {
-        const env = Deno.env.get('DENO_ENV') || Deno.env.get('APP_ENV') ||
-            'development'
+        // `resolveEnvName` is NotCapable-safe: this runs synchronously inside
+        // `listen()` BEFORE the shutdown signal handlers are installed, and a
+        // `deno compile --allow-net` binary once died here — over a banner —
+        // because a raw `Deno.env.get` raised without `--allow-env`. The helper
+        // guards the read and defaults to development, so no local guard is
+        // needed and the environment rule stays in one place.
+        const env = resolveEnvName()
         const isProd = env.toLowerCase() === 'production'
         const envLabel = isProd
             ? '\x1b[45m\x1b[37m\x1b[1m PRODUCTION \x1b[0m'

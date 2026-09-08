@@ -7,6 +7,8 @@
 
 import type { BootstrapStep } from '../types.ts'
 import { tryImportOptionalPackage } from '../helpers.ts'
+import { registerDisposable } from '@lockness/contract'
+import { SHUTDOWN_PRIORITY } from '../../shutdown_registry.ts'
 
 /**
  * Build the reporter the Scheduler sends failures to.
@@ -59,7 +61,8 @@ async function buildReporter(): Promise<
  * - Skip entirely when `SCHEDULER_ENABLED` is set to a falsy value, so a
  *   multi-replica operator has a one-variable answer rather than a code change
  * - Wire the application's logger into the Scheduler's reporter port, so
- *   failures do not fall back to raw `console.error` (FR-020)
+ *   failures do not fall back to raw `console.error` (FR-020) — unless the
+ *   application already installed a reporter of its own, which wins
  * - Discover from `schedulesDir`, and register the explicit `schedules` list
  * - Start the scheduler and log the **armed** count unconditionally
  * - **Re-throw** parse and registration failures. A schedule that cannot be
@@ -99,13 +102,66 @@ export const schedulerStep: BootstrapStep = {
         const { discoverSchedules, registerSchedules } = await import(
             '../../../scheduler/schedule_discovery.ts'
         )
-        const { DEFAULT_SCHEDULES_DIR, Scheduler, scheduler, setScheduler } =
-            await import('@lockness/scheduler')
+        const { DEFAULT_SCHEDULES_DIR, scheduler } = await import(
+            '@lockness/scheduler'
+        )
 
         // Install the reporter BEFORE discovery, because discovery registers
         // into whichever instance `scheduler()` returns.
+        //
+        // In PLACE, not by swapping the shared instance. `setScheduler(new
+        // Scheduler(reporter))` discarded two things it had no business
+        // discarding: any task an application registered imperatively before
+        // boot, and the application's own reporter — the one `docs/DOCS.md`
+        // tells people to install with `setScheduler(new Scheduler({ … }))`,
+        // which was silently overwritten whenever @lockness/logger happened to
+        // be present. `hasReporter` is what makes the application's choice win.
         const reporter = await buildReporter()
-        if (reporter) setScheduler(new Scheduler(reporter))
+        if (reporter && !scheduler().hasReporter) {
+            scheduler().setReporter(reporter)
+        }
+
+        // Distributed lock (#219): build the configured adapter at this
+        // composition root and install it, so `onOneServer` tasks claim each
+        // occurrence across replicas. The adapters live in core, never in
+        // `@lockness/scheduler` (whose zero-dependency ceiling must hold).
+        const lockConfig = context.config.schedulerLock
+        if (lockConfig && !scheduler().hasLock) {
+            const { DenoKvSchedulerLock, RedisSchedulerLock } = await import(
+                '../../../scheduler/locks.ts'
+            )
+            if (lockConfig.driver === 'redis' && lockConfig.redis) {
+                const redisMod = await tryImportOptionalPackage<{
+                    RedisClient: new (c: unknown) => {
+                        command(
+                            ...a: string[]
+                        ): Promise<{ type: string; value?: string | number }>
+                        close(): Promise<void>
+                    }
+                }>('@lockness/redis', 'scheduler lock')
+                if (redisMod) {
+                    const client = new redisMod.RedisClient(lockConfig.redis)
+                    scheduler().setLock(
+                        new RedisSchedulerLock(client, lockConfig.ttlMs),
+                    )
+                    registerDisposable({
+                        name: 'scheduler:lock:redis',
+                        dispose: () => client.close(),
+                        priority: SHUTDOWN_PRIORITY.STORES,
+                    })
+                }
+            } else if (lockConfig.driver === 'deno-kv') {
+                const kv = await Deno.openKv(lockConfig.kvPath)
+                scheduler().setLock(
+                    new DenoKvSchedulerLock(kv, lockConfig.ttlMs),
+                )
+                registerDisposable({
+                    name: 'scheduler:lock:kv',
+                    dispose: () => kv.close(),
+                    priority: SHUTDOWN_PRIORITY.STORES,
+                })
+            }
+        }
 
         // The constant, not a restated literal. Restating it is the duplication
         // that already ships for listeners — steps/listeners.ts:33 hardcodes
@@ -133,6 +189,20 @@ export const schedulerStep: BootstrapStep = {
         }
 
         const armed = scheduler().start()
+
+        // Release the timers at shutdown. Until #129 this package's `stop()`
+        // had exactly one caller in the whole repository, and it was a test —
+        // so every application that armed a schedule leaked its timers on exit
+        // and each author was told to wire `Deno.addSignalListener` by hand.
+        //
+        // SHUTDOWN_PRIORITY.SERVICES, never the step's `order` of 560. Those are
+        // different axes that happen to look alike; reusing an `order` here is
+        // the mistake the named band exists to prevent.
+        context.app?.onShutdown(
+            'scheduler',
+            () => scheduler().stop(),
+            SHUTDOWN_PRIORITY.SERVICES,
+        )
 
         // Logged unconditionally, including zero. The listeners step guards its
         // equivalent on `count > 0`, which makes the message inert in exactly

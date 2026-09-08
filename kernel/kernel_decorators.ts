@@ -33,7 +33,7 @@
  * ```
  */
 
-import type { CompileConfig, MountPoint } from '../types.ts'
+import type { CompileConfig, MountPoint, SsgConfig } from '../types.ts'
 
 /**
  * Database configuration options
@@ -44,6 +44,16 @@ export interface DatabaseConfig {
      * @example 'postgres://localhost:5432/mydb'
      */
     url?: string
+
+    /**
+     * The SQL dialect to connect through. When omitted, `@lockness/drizzle`
+     * infers it from the URL scheme (falling back to `postgres`), so existing
+     * PostgreSQL apps need no change. The single home for the dialect decision.
+     *
+     * @default 'postgres'
+     * @example 'mysql'
+     */
+    driver?: 'postgres' | 'mysql' | 'sqlite'
 
     /**
      * Whether to automatically connect on startup
@@ -69,10 +79,26 @@ export interface SessionConfig {
     secret?: string
 
     /**
-     * Session lifetime in seconds
+     * Idle session lifetime in seconds (refreshed on every write)
      * @default 7200 (2 hours)
      */
     lifetime?: number
+
+    /**
+     * Absolute session lifetime in seconds — the hard ceiling from first
+     * issuance, never refreshed. Leave undefined to disable the cap; `0`/negative
+     * is a configuration error. Recommended when enabled: 604800 (7 days). Only
+     * the cookie driver enforces it.
+     * @default undefined (no absolute cap)
+     */
+    absoluteLifetime?: number
+
+    /**
+     * Enable per-session cookie revocation (logout invalidates a captured copy).
+     * Requires `absoluteLifetime`; enabling it without the cap is refused at boot.
+     * @default false
+     */
+    revocation?: boolean
 
     /**
      * Whether to use secure cookies (HTTPS only)
@@ -107,6 +133,78 @@ export interface CacheConfig {
      * @default 'lockness'
      */
     prefix?: string
+}
+
+/**
+ * Shutdown lifecycle configuration options.
+ *
+ * A **named exported interface**, like {@link DatabaseConfig},
+ * {@link SessionConfig} and {@link CacheConfig} beside it — not an inline
+ * literal on {@link KernelConfig}. An inline shape gives a consumer building
+ * configuration programmatically nothing to import, so the first one that tries
+ * declares its own copy and the two drift.
+ *
+ * @since 0.2.1
+ *
+ * @example Keep today's behaviour exactly
+ * ```typescript
+ * @Kernel({ shutdown: { signals: false } })
+ * class AppKernel {}
+ * ```
+ *
+ * @example Give teardown longer
+ * ```typescript
+ * @Kernel({ shutdown: { deadlineMs: 20_000 } })
+ * class AppKernel {}
+ * ```
+ */
+export interface ShutdownConfig {
+    /**
+     * Whether `App.listen()` installs `SIGINT` and `SIGTERM` handlers.
+     *
+     * **Unset means on** — the strict value, so the behaviour is safe by
+     * default rather than by remembering to opt in.
+     *
+     * Set it to `false` when the application already installs its own signal
+     * handlers and you want today's behaviour unchanged. That matters more than
+     * it sounds: both handlers would otherwise run *concurrently*, and the
+     * first to reach `Deno.exit` ends the process — so a hand-written handler
+     * that flushes a buffer or releases a lock can be cut short mid-drain.
+     *
+     * @default true
+     */
+    signals?: boolean
+
+    /**
+     * How long the whole shutdown sequence may take, in milliseconds.
+     *
+     * Bounds the server drain **and** the hooks together, not each separately.
+     * Must be a finite integer in `[1, 2**31 - 1]`; anything else fails the
+     * boot rather than being silently accepted, because `setTimeout` clamps
+     * `NaN`, `Infinity`, `0` and any value at or above `2**31` to **1 ms** —
+     * which would turn this bound into its own opposite without saying so.
+     *
+     * @default 10000
+     */
+    deadlineMs?: number
+}
+
+/**
+ * Local i18n configuration shape — mirrors `@lockness/i18n`'s `I18nConfig`
+ * structurally so `@lockness/core` needs **no import** from it (the edge stays
+ * soft-only). The soft-loaded package validates it fully.
+ */
+export interface I18nConfig {
+    /** `locale → messages` catalog map (statically importable). */
+    catalogs: Record<string, unknown>
+    /** The default locale (should equal `config/i18n.ts`'s `defaultLocale`). */
+    defaultLocale: string
+    /** An optional fallback locale tried before the default. */
+    fallbackLocale?: string
+    /** The resolver's locale-source order. */
+    sources?: ReadonlyArray<'route' | 'cookie' | 'header'>
+    /** The cookie name carrying a locale. */
+    cookieName?: string
 }
 
 /**
@@ -172,6 +270,36 @@ export interface KernelConfig {
      * ```
      */
     cache?: CacheConfig | boolean
+
+    /**
+     * i18n / translation configuration
+     * - `I18nConfig`: catalogs + default locale (soft-loads `@lockness/i18n`)
+     * - `undefined`: skip i18n setup
+     *
+     * Typed by a **local** {@link I18nConfig} interface (like {@link SessionConfig}),
+     * not imported from `@lockness/i18n` — that keeps the `core → i18n` edge
+     * soft-only.
+     *
+     * @example
+     * ```typescript
+     * i18n: { catalogs: { 'en-us': en, 'fr-fr': fr }, defaultLocale: 'en-us' }
+     * ```
+     */
+    i18n?: I18nConfig
+
+    /**
+     * Shutdown lifecycle configuration.
+     *
+     * Omit it and the framework installs `SIGINT`/`SIGTERM` handlers and bounds
+     * teardown at 10 seconds — the defaults every application wants. See
+     * {@link ShutdownConfig}.
+     *
+     * @example
+     * ```typescript
+     * shutdown: { deadlineMs: 20_000 }
+     * ```
+     */
+    shutdown?: ShutdownConfig
 
     /**
      * Enable devtools in development
@@ -263,6 +391,37 @@ export interface KernelConfig {
     schedules?: unknown[]
 
     /**
+     * Distributed lock for `onOneServer` scheduled tasks (#219).
+     *
+     * When set, core builds the matching {@link SchedulerLock} adapter at boot
+     * and installs it, so a task marked `onOneServer` runs on exactly one
+     * replica. Omitted, `onOneServer` is inert and every replica runs the task
+     * in-process. Size `ttlMs` above a guarded task's worst-case runtime — the
+     * guarantee is at-most-once **within the TTL**.
+     *
+     * @example
+     * ```typescript
+     * @Kernel({ schedulerLock: { driver: 'redis', redis: { hostname: '127.0.0.1' } } })
+     * ```
+     */
+    schedulerLock?: {
+        /** Which backing store the lock uses. */
+        driver: 'redis' | 'deno-kv'
+        /** Claim lifetime in milliseconds. @default 300000 */
+        ttlMs?: number
+        /** Deno KV path (for the `'deno-kv'` driver). */
+        kvPath?: string
+        /** Redis connection (for the `'redis'` driver). */
+        redis?: {
+            hostname: string
+            port?: number
+            password?: string
+            db?: number
+            tls?: boolean
+        }
+    }
+
+    /**
      * Mount point for URL prefixing (i18n, multi-tenancy).
      *
      * When defined, the application is accessible under the mount point's pattern
@@ -291,6 +450,13 @@ export interface KernelConfig {
      * Use this to orchestrate the `deno compile` process.
      */
     compile?: CompileConfig
+
+    /**
+     * Static-site generation configuration — the curated locale list the
+     * `ssg:build` command reads. The single home for "which locales are
+     * emitted"; omit for a root-only static build.
+     */
+    ssg?: SsgConfig
 }
 
 /**
@@ -419,7 +585,7 @@ export function Kernel(
  *     get globalMiddlewares() {
  *         const middlewares = [sessionMiddleware()]
  *
- *         if (Deno.env.get('APP_ENV') === 'production') {
+ *         if (isProduction()) {
  *             middlewares.push(securityHeadersMiddleware())
  *         }
  *

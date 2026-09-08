@@ -44,29 +44,74 @@ export * from './exceptions/formatter.ts'
 export * from './exceptions/default_view.tsx'
 export * from './helpers.ts'
 
+// API Resource layer — opt-in model→wire projection + paginated collection.
+export { NEVER_SERIALISE, Resource } from './resource/resource.ts'
+export { ResourceCollection } from './resource/collection.ts'
+
+// Application cryptography — Crypt / Hash / HMAC signing (from @lockness/crypto).
+export { Crypt, Hash, sign, verify } from '@lockness/crypto'
+
+// Signed / temporary route URLs.
+export {
+    canonicalise,
+    EXPIRES_PARAM,
+    SIGNATURE_PARAM,
+    signedUrl,
+    SignedUrlError,
+    type SignedUrlOptions,
+} from './routing/signed_url.ts'
+export { SignedUrlMiddleware } from './http/signed_url_middleware.ts'
+
+// Environment-name resolution (DENO_ENV first, then APP_ENV) — the single home
+// of the production/development rule.
+export * from './environment.ts'
+
 // Export events system (decorators, dispatcher, base classes, testing)
 export {
     BaseEvent,
     configureEventDispatcher,
     ControllerExecuting,
+    // Streams, signals and the debug switch — #135. Core re-exports a NAMED
+    // list, so anything absent from it is unreachable from an application even
+    // though @lockness/events exports it.
+    createEventQueue,
+    debugLog,
+    DEFAULT_BUFFER_SIZE,
+    DEFAULT_OVERFLOW,
     dispatcher,
     EventBuffer,
     EventDispatcher,
+    EventEmitter,
+    eventStream,
     ExceptionOccurred,
     // Testing utilities
     fake,
     getActiveFake,
     getListenerMetadata,
+    isDebugEnabled,
     // Framework lifecycle events
     KernelBooted,
     KernelTerminating,
     Listener,
     type ListenerMetadata,
     type ListenerOptions,
+    MAX_BUFFER_SIZE,
+    OVERFLOW_POLICIES,
     RequestCompleted,
     RequestStarted,
     ResponsePrepared,
     restore,
+    setEventsDebug,
+    waitForEvent,
+} from '@lockness/events'
+export type {
+    DebugRecord,
+    EventListener,
+    EventQueue,
+    ListenerConfig,
+    OverflowPolicy,
+    OverflowReport,
+    StreamOptions,
 } from '@lockness/events'
 
 // Export listener registration for package authors
@@ -91,6 +136,30 @@ export {
     type OnBootOptions,
     runBootHooks,
     type SessionConfig,
+} from './kernel/mod.ts'
+
+// Shutdown lifecycle — @OnShutdown and what an application needs to use it.
+//
+// Deliberately NARROWER than the modules export. `ShutdownSequence`,
+// `ShutdownRegistry`, `installShutdownSignals`, `exitCodeFor`,
+// `resolveDeadlineMs` and `renderError` are internal: a consumer calling
+// `installShutdownSignals(new ShutdownSequence())` would install a SECOND pair
+// of signal handlers over a SECOND teardown list, which is the two-deciders
+// shape the decision table exists to prevent. Neither has a caller outside
+// core. Re-export one only when something outside core needs it.
+export {
+    DEFAULT_SHUTDOWN_DEADLINE_MS,
+    getShutdownHooks,
+    KERNEL_SHUTDOWN_HOOKS,
+    OnShutdown,
+    type OnShutdownOptions,
+    SHUTDOWN_PRIORITY,
+    type ShutdownConfig,
+    type ShutdownFailure,
+    type ShutdownHookMeta,
+    type ShutdownHookMethod,
+    type ShutdownHooksContainer,
+    type ShutdownReport,
 } from './kernel/mod.ts'
 
 // Export kernel loader
@@ -179,6 +248,8 @@ export {
 export async function registerCoreCommands(cli: any) {
     const { CompileCommand } = await import('./cli/compile_command.ts')
     cli.registerCommand(CompileCommand)
+    const { SsgCommand } = await import('./cli/ssg_command.ts')
+    cli.registerCommand(SsgCommand)
 }
 
 // ============================================================================
